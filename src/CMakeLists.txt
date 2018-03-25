@@ -1,0 +1,4 @@
+set(CF_HEADERS DHCP_CLIENT.h)
+set(CF_SOURCES main.cpp DHCP_CLIENT.cpp FSM.cpp FSM.h)
+
+add_executable(${PROJECT_NAME} ${CF_HEADERS} ${CF_SOURCES})
