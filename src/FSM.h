@@ -12,11 +12,11 @@ enum states {
 
 class FSM {
 private:
-    int state;
+    states state;
 public:
     FSM() = default;
     int getState() const;
-    void setState(int state);
+    void setState(states state);
 };
 
 #endif //DHCP_CLIENT_FSM_H

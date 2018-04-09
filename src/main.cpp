@@ -5,6 +5,8 @@
 #include <getopt.h>
 #include <net/if.h>
 #include <cstring>
+#include <zconf.h>
+#include <random>
 #include "DHCP_CLIENT.h"
 #include "FSM.h"
 
@@ -46,6 +48,7 @@ int main(int argc, char** argv) {
                 run = false;
                 break;
         }
+        run = false;
     }
     return 0;
 }

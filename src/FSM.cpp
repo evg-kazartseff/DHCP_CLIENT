@@ -8,6 +8,6 @@ int FSM::getState() const {
     return state;
 }
 
-void FSM::setState(int state) {
-    FSM::state = state;
+void FSM::setState(states st) {
+    FSM::state = st;
 }

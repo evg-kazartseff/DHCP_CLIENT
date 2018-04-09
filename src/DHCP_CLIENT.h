@@ -16,6 +16,32 @@
 #include <net/if.h>
 #include <arpa/inet.h>
 #include <ctime>
+#include <queue>
+
+#define BOOTREQUEST     1
+#define BOOTREPLY       2
+
+#define DHCPDISCOVER    1
+#define DHCPOFFER       2
+#define DHCPREQUEST     3
+#define DHCPDECLINE     4
+#define DHCPACK         5
+#define DHCPNACK        6
+#define DHCPRELEASE     7
+
+#define DHCP_OPTION_MESSAGE_TYPE        53
+#define DHCP_OPTION_HOST_NAME           12
+#define DHCP_OPTION_BROADCAST_ADDRESS   28
+#define DHCP_OPTION_REQUESTED_ADDRESS   50
+#define DHCP_OPTION_LEASE_TIME          51
+#define DHCP_OPTION_RENEWAL_TIME        58
+#define DHCP_OPTION_REBINDING_TIME      59
+
+#define DHCP_INFINITE_TIME              0xFFFFFFFF
+
+#define DHCP_BROADCAST_FLAG 32768
+
+#define ETHERNET_HARDWARE_ADDRESS            1     /* used in htype field of dhcp packet */
 
 #define MAX_DHCP_CHADDR_LENGTH      16
 #define MAX_DHCP_SNAME_LENGTH       64
@@ -37,13 +63,12 @@ typedef struct dhcp_packet_struct {
     unsigned char chaddr [MAX_DHCP_CHADDR_LENGTH];      /* hardware address of this machine */
     char sname [MAX_DHCP_SNAME_LENGTH];    /* name of DHCP server */
     char file [MAX_DHCP_FILE_LENGTH];      /* boot file name (used for diskless booting?) */
-    uint32_t    magic_cookie;
+    uint32_t magic_cookie;
     char options[MAX_DHCP_OPTIONS_LENGTH];  /* options */
 } Dhcp_packet;
-
-typedef struct ether_header Ethhdr;
-typedef struct iphdr Iphdr;
 typedef struct udphdr Udphdr;
+typedef struct iphdr Iphdr;
+typedef struct ether_header Ethhdr;
 
 #define MAX_SIZE_PACKET             594
 #define DHCP_SERVER_PORT            67
@@ -83,14 +108,24 @@ private:
     char* if_name[IF_NAMESIZE];
     int if_index;
 
+    uint32_t packet_xid;
+
+    std::queue<char*> DHCPOFFER_queue;
+
     char* get_DHCPDISCOVER_packet();
     int Fill_eth_hdr(Ethhdr* ethhdr);
     int Fill_ip_hdr(Iphdr* iphdr);
     int Fill_udp_hdr(Udphdr* udphdr);
+    int Fill_base_dhcp_pac(Dhcp_packet* dhcp);
+    uint32_t Fill_dhcp_options(Dhcp_packet* DHCP_pack, uint32_t cur, uint8_t type, uint8_t len, char* option);
+    int Udp_csum(Iphdr* ippac, Udphdr* udppac);
+    int Ip_csum(Iphdr* iphdr);
+    uint16_t csum(uint16_t* ptr, size_t len);
 public:
     explicit DHCP_CLIENT(char* ifname);
 
     int DHCP_Init();
+    int DHCP_Get_OFFER();
 };
 
 #endif //DHCP_CLIENT_DHCP_CLIENT_H
