@@ -42,13 +42,28 @@ int main(int argc, char** argv) {
     while (run) {
         switch (fsm->getState()) {
             case STATE_INIT:
-                dhcp_client->DHCP_Init();
+                if (dhcp_client->DHCP_Init() == EXIT_SUCCESS)
+                    fsm->setState(STATE_SELECT);
+                else
+                    fsm->setState(STATE_ERR);
+                break;
+            case STATE_SELECT:
+                if (dhcp_client->DHCP_Select() == EXIT_SUCCESS)
+                    fsm->setState(STATE_REQUEST);
+                else
+                    fsm->setState(STATE_ERR);
+                break;
+            case STATE_REQUEST:
+                dhcp_client->DHCP_Request();
+                fsm->setState(STATE_ERR);
+            case STATE_ERR:
+                dhcp_client->DHCP_Error_Hadler();
+                run = false;
                 break;
             default:
                 run = false;
                 break;
         }
-        run = false;
     }
     return 0;
 }

@@ -7,7 +7,9 @@
 
 enum states {
     STATE_INIT,
-
+    STATE_SELECT,
+    STATE_ERR,
+    STATE_REQUEST,
 };
 
 class FSM {
