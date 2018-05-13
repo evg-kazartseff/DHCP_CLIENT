@@ -222,8 +222,10 @@ int DHCP_CLIENT::Get_DHCPOFFER_packets() {
     memset(&recv_addrin, 0, sizeof(struct sockaddr_in));
     ssize_t bytes_read;
     size_t wait = this->select_timeout;
-    char* pac = new char[MAX_SIZE_PACKET];
+    char* pac = nullptr;
     while (wait--) {
+        if (!pac)
+            pac = new char[MAX_SIZE_PACKET];
         bytes_read = recvfrom(this->sock, pac, MAX_SIZE_PACKET, 0, (struct sockaddr*) &recv_addrin, &socklen);
         if (bytes_read == EAGAIN || bytes_read <= 0) {
             continue;
@@ -233,8 +235,10 @@ int DHCP_CLIENT::Get_DHCPOFFER_packets() {
         auto* dhcp_pack = (Dhcp_packet*) (pac + this->offset.goto_dhcppac);
         if (ntohs(udp_hdr->dest) == this->client.port)
             if (memcmp(eth_hdr->ether_dhost, this->client.mac, ETH_ALEN) == 0 || memcmp(eth_hdr->ether_dhost, this->servers.mac, ETH_ALEN) == 0)
-                if (ntohl(dhcp_pack->xid) == this->packet_xid)
+                if (ntohl(dhcp_pack->xid) == this->packet_xid) {
                     this->DHCPOFFER_queue.push(pac);
+                    pac = nullptr;
+                }
     }
     if (this->DHCPOFFER_queue.empty())
         return EXIT_FAILURE;
@@ -250,36 +254,18 @@ int DHCP_CLIENT::DHCP_Select() {
     return EXIT_SUCCESS;
 }
 
-char* DHCP_CLIENT::get_ARPREQUEST(char* target_ip) {
-    struct ARPPacket {
-        struct ether_header eth_hdr;
-        struct ether_arp arp_hdr;
-    };
-    auto*arp = new char[sizeof(struct ARPPacket)];
-    auto* packet = (struct ARPPacket*) arp;
-    memset(packet, 0, sizeof(struct ARPPacket));
-    memcpy(packet->eth_hdr.ether_dhost, this->servers.mac, ETH_ALEN);
-    memcpy(packet->eth_hdr.ether_shost, this->client.mac, ETH_ALEN);
-    packet->eth_hdr.ether_type = htons(ETH_P_ARP);
-    packet->arp_hdr.ea_hdr.ar_hrd = htons(ARPHRD_ETHER);
-    packet->arp_hdr.ea_hdr.ar_pro = htons(ETH_P_IP);
-    packet->arp_hdr.ea_hdr.ar_hln = ETH_ALEN;
-    packet->arp_hdr.ea_hdr.ar_pln = IP_ALEN;
-    packet->arp_hdr.ea_hdr.ar_op = ARPOP_REQUEST;
-    memcpy(packet->arp_hdr.arp_sha, this->client.mac, ETH_ALEN);
-    memcpy(packet->arp_hdr.arp_tpa, target_ip, IP_ALEN);
-    return arp;
-}
-
 int DHCP_CLIENT::DHCP_Request() {
+    if (this->DHCPOFFER_queue.empty()) {
+        this->Error = DHCP_SERVERS_NOT_RESPOND;
+        return EXIT_FAILURE;
+    }
     char* OFFER = this->DHCPOFFER_queue.front();
     this->DHCPOFFER_queue.pop();
     auto* offer_dhcp_pack = (Dhcp_packet*) (OFFER + this->offset.goto_dhcppac);
     struct in_addr offer_ip = offer_dhcp_pack->yiaddr;
-    struct in_addr server_ip = offer_dhcp_pack->siaddr;
     delete OFFER;
 
-    char* REQUEST = this->get_DHCPREQUEST_packet(offer_ip, server_ip);
+    char* REQUEST = this->get_DHCPREQUEST_packet(offer_ip);
     if (sendto(this->sock, REQUEST, MAX_SIZE_PACKET, 0, (struct sockaddr*) &this->addr_ll, sizeof(struct sockaddr_ll)) < 0) {
         this->Error = SEND_ERROR;
         delete REQUEST;
@@ -288,13 +274,11 @@ int DHCP_CLIENT::DHCP_Request() {
     delete REQUEST;
 
     char* ACK = this->get_DHCPACK_packet();
-
-    // TODO send arp test
-
+    this->DHCPPACK_buff.push(ACK);
     return EXIT_SUCCESS;
 }
 
-char* DHCP_CLIENT::get_DHCPREQUEST_packet(in_addr offer_ip, in_addr server_ip) {
+char* DHCP_CLIENT::get_DHCPREQUEST_packet(in_addr offer_ip) {
     char* packet = new char[MAX_SIZE_PACKET];
     memset(packet, 0, MAX_SIZE_PACKET);
     auto* eth_hdr = (Ethhdr*) packet;
@@ -305,7 +289,6 @@ char* DHCP_CLIENT::get_DHCPREQUEST_packet(in_addr offer_ip, in_addr server_ip) {
 
     Fill_eth_hdr(eth_hdr);
     Fill_ip_hdr(ip_hdr);
-    ip_hdr->daddr = server_ip.s_addr;
     Fill_udp_hdr(udp_hdr);
     Fill_base_dhcp_pac(Dhcp_pack);
 
@@ -320,13 +303,13 @@ char* DHCP_CLIENT::get_DHCPREQUEST_packet(in_addr offer_ip, in_addr server_ip) {
 
     unsigned char parameter_request_list[16];
     parameter_request_list[0] = 1;      // Subnet Mask
-    parameter_request_list[1] = 28;     // Broadcast Address
+    parameter_request_list[1] = DHCP_OPTION_BROADCAST_ADDRESS;     // Broadcast Address
     parameter_request_list[2] = 2;      // Time Offset
     parameter_request_list[3] = 3;      // Router
     parameter_request_list[4] = 15;     // Domain Name
     parameter_request_list[5] = 6;      // Domain Name Server
     parameter_request_list[6] = 119;    // Domain Search
-    parameter_request_list[7] = 12;     // Host Name
+    parameter_request_list[7] = DHCP_OPTION_HOST_NAME;     // Host Name
     parameter_request_list[8] = 44;     // NetBIOS over TCP/IP Name Server
     parameter_request_list[9] = 47;     // NetBIOS over TCP/IP Scope
     parameter_request_list[10] = 26;    // Interface MTU
@@ -374,15 +357,132 @@ char* DHCP_CLIENT::get_DHCPACK_packet() {
         auto* eth_hdr = (Ethhdr*) pack;
         auto* udp_hdr = (Udphdr*) (pack + this->offset.goto_udphdr);
         auto* dhcp_pack = (Dhcp_packet*) (pack + this->offset.goto_dhcppac);
-        if (ntohs(udp_hdr->dest) == this->client.port)
-            if (memcmp(eth_hdr->ether_dhost, this->client.mac, ETH_ALEN) == 0 || memcmp(eth_hdr->ether_dhost, this->servers.mac, ETH_ALEN) == 0)
+        if (ntohs(udp_hdr->dest) == this->client.port) {
+            if (memcmp(eth_hdr->ether_dhost, this->client.mac, ETH_ALEN) == 0 || memcmp(eth_hdr->ether_dhost, this->servers.mac, ETH_ALEN) == 0) {
                 if (ntohl(dhcp_pack->xid) == this->packet_xid) {
-                    packet_get = true;
-                    break;
+                    int cur = Find_DHCP_option(dhcp_pack, DHCP_OPTION_MESSAGE_TYPE);
+                    if (cur != -1) {
+                        if (dhcp_pack->options[cur + 2] == DHCPACK) {
+                            packet_get = true;
+                            break;
+                        }
+                    }
                 }
+            }
+        }
     }
     if (packet_get)
         return pack;
     else
         return nullptr;
+}
+
+int DHCP_CLIENT::DHCP_Test_ARP() {
+    if (this->DHCPPACK_buff.empty())
+        return EXIT_FAILURE;
+    char* DHCPACK_packet = this->DHCPPACK_buff.front();
+    auto* dhcppack = (Dhcp_packet *) (DHCPACK_packet + this->offset.goto_dhcppac);
+    char ip[4];
+    memcpy(ip, &dhcppack->yiaddr, 4);
+    auto* ARPREQ = this->get_ARPREQUEST(ip);
+    if (sendto(this->sock, ARPREQ, ARP_PACKET_LEN, 0, (struct sockaddr*) &this->addr_ll, sizeof(struct sockaddr_ll)) < 0) {
+        this->Error = SEND_ERROR;
+        delete ARPREQ;
+        return EXIT_FAILURE;
+    }
+    delete ARPREQ;
+    if (get_ARPREPLY(ip)) {
+        return ARP_FAIL;
+    }
+    return EXIT_SUCCESS;
+}
+
+char* DHCP_CLIENT::get_ARPREQUEST(char* target_ip) {
+    uint32_t size_packet = sizeof(Ethhdr) + sizeof(Arphdr);
+    auto* arp = new char[size_packet];
+    memset(arp, 0, size_packet);
+    auto* eth_hdr = (Ethhdr*) arp;
+    auto* arp_hdr = (Arphdr*) (arp + sizeof(Ethhdr));
+    memcpy(eth_hdr->ether_dhost, this->servers.mac, ETH_ALEN);
+    memcpy(eth_hdr->ether_shost, this->client.mac, ETH_ALEN);
+    eth_hdr->ether_type = htons(ETH_P_ARP);
+    arp_hdr->ea_hdr.ar_hrd = htons(ARPHRD_ETHER);
+    arp_hdr->ea_hdr.ar_pro = htons(ETH_P_IP);
+    arp_hdr->ea_hdr.ar_hln = ETH_ALEN;
+    arp_hdr->ea_hdr.ar_pln = IP_ALEN;
+    arp_hdr->ea_hdr.ar_op = htons(ARPOP_REQUEST);
+    memcpy(arp_hdr->arp_sha, this->client.mac, ETH_ALEN);
+    memcpy(arp_hdr->arp_tpa, target_ip, IP_ALEN);
+    return arp;
+}
+
+int32_t DHCP_CLIENT::Find_DHCP_option(Dhcp_packet* DHCP_pack, char option) {
+    int i;
+    for (i = 0; DHCP_pack->options[i] != option || DHCP_pack->options[i] == DHCP_OPTION_END; i += (DHCP_pack->options[i + 1] + 2));
+    if (DHCP_pack->options[i] == DHCP_OPTION_END) return -1;
+    return i;
+}
+
+bool DHCP_CLIENT::get_ARPREPLY(char* ip_from) {
+    uint32_t socklen;
+    struct sockaddr_in recv_addrin;
+    memset(&recv_addrin, 0, sizeof(struct sockaddr_in));
+    ssize_t bytes_read;
+    size_t wait = this->select_timeout / 2;
+    char* pac = new char[MAX_SIZE_PACKET];
+    while (wait--) {
+        bytes_read = recvfrom(this->sock, pac, MAX_SIZE_PACKET, 0, (struct sockaddr*) &recv_addrin, &socklen);
+        if (bytes_read == EAGAIN || bytes_read <= 0) {
+            continue;
+        }
+        auto* eth_hdr = (Ethhdr*) pac;
+        auto* arp_hdr = (Arphdr*) (pac + sizeof(Ethhdr));
+        if (memcmp(eth_hdr->ether_dhost, this->client.mac, ETH_ALEN) == 0)
+            if (ntohl(arp_hdr->ea_hdr.ar_op) == ARPOP_REPLY)
+                if (memcmp(&arp_hdr->arp_spa, ip_from, 4) == 0) {
+                    delete pac;
+                    return true;
+                }
+    }
+    delete pac;
+    return false;
+}
+
+int DHCP_CLIENT::DHCP_Send_Decline() {
+    char* DHCPACK_packet = this->DHCPPACK_buff.front();
+    auto* dhcppack = (Dhcp_packet *) (DHCPACK_packet + this->offset.goto_dhcppac);
+    char* packet = this->get_DHCPDECLINE_packet(dhcppack->yiaddr.s_addr);
+    if (sendto(this->sock, packet, MAX_SIZE_PACKET, 0, (struct sockaddr*) &this->addr_ll, sizeof(struct sockaddr_ll)) < 0) {
+        this->Error = SEND_ERROR;
+        delete packet;
+        return EXIT_FAILURE;
+    }
+    delete packet;
+    return EXIT_SUCCESS;
+}
+
+char* DHCP_CLIENT::get_DHCPDECLINE_packet(in_addr_t ip) {
+    char* packet = new char[MAX_SIZE_PACKET];
+    memset(packet, 0, MAX_SIZE_PACKET);
+
+    auto* eth_hdr = (Ethhdr*) packet;
+    auto* ip_hdr = (Iphdr*) (packet + this->offset.goto_iphdr);
+    auto* udp_hdr = (Udphdr*) (packet + this->offset.goto_udphdr);
+    auto* Dhcp_pack = (Dhcp_packet*) (packet + this->offset.goto_dhcppac);
+
+    Fill_eth_hdr(eth_hdr);
+    Fill_ip_hdr(ip_hdr);
+    Fill_udp_hdr(udp_hdr);
+    Fill_base_dhcp_pac(Dhcp_pack);
+    Dhcp_pack->yiaddr.s_addr = ip;
+    uint32_t cur = 0;
+    char option = DHCPDECLINE;
+    cur = Fill_dhcp_options(Dhcp_pack, cur, DHCP_OPTION_MESSAGE_TYPE, 1, &option);
+    cur = Fill_dhcp_options(Dhcp_pack, cur, DHCP_OPTION_REQUESTED_ADDRESS, IP_ALEN, reinterpret_cast<char*>(&ip));
+    Dhcp_pack->options[cur] = static_cast<char>(DHCP_OPTION_END);
+
+    Ip_csum(ip_hdr);
+    Udp_csum(ip_hdr, udp_hdr);
+
+    return packet;
 }

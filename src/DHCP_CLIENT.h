@@ -52,12 +52,15 @@
 #define ETHERNET_HARDWARE_ADDRESS   1     /* used in htype field of dhcp packet */
 #define IP_ALEN                     4
 
+#define ARP_PACKET_LEN              42
+
 #define MAX_DHCP_CHADDR_LENGTH      16
 #define MAX_DHCP_SNAME_LENGTH       64
 #define MAX_DHCP_FILE_LENGTH        128
 #define MAX_DHCP_OPTIONS_LENGTH     312
 
 #define RECV_TIMEOUT_USEC            10
+#define ARP_FAIL                    100
 
 typedef struct dhcp_packet_struct {
     u_int8_t  op;                   /* packet type */
@@ -80,6 +83,7 @@ typedef struct dhcp_packet_struct {
 typedef struct udphdr Udphdr;
 typedef struct iphdr Iphdr;
 typedef struct ether_header Ethhdr;
+typedef struct ether_arp Arphdr;
 struct sockaddr_ll;
 
 #define MAX_SIZE_PACKET             594
@@ -133,11 +137,13 @@ private:
 
     uint32_t select_timeout;
     std::queue<char*> DHCPOFFER_queue;
+    std::queue<char*> DHCPPACK_buff;
 
     char* get_DHCPDISCOVER_packet();
     int Get_DHCPOFFER_packets();
-    char* get_DHCPREQUEST_packet(in_addr offer_ip, in_addr server_ip);
+    char* get_DHCPREQUEST_packet(in_addr offer_ip);
     char* get_DHCPACK_packet();
+    char* get_DHCPDECLINE_packet(in_addr_t ip);
     int Fill_eth_hdr(Ethhdr* ethhdr);
     int Fill_ip_hdr(Iphdr* iphdr);
     int Fill_udp_hdr(Udphdr* udphdr);
@@ -147,11 +153,15 @@ private:
     int Ip_csum(Iphdr* iphdr);
     uint16_t csum(uint16_t* ptr, size_t len);
     char* get_ARPREQUEST(char* target_ip);
+    bool get_ARPREPLY(char* ip_from);
+    int32_t Find_DHCP_option(Dhcp_packet* DHCP_pack, char option);
 public:
     explicit DHCP_CLIENT(char* ifname);
     int DHCP_Init();
     int DHCP_Select();
     int DHCP_Request();
+    int DHCP_Test_ARP();
+    int DHCP_Send_Decline();
     int DHCP_Error_Hadler();
 };
 

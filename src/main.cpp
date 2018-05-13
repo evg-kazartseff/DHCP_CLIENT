@@ -39,6 +39,7 @@ int main(int argc, char** argv) {
     FSM* fsm = new FSM();
     fsm->setState(STATE_INIT);
     bool run = true;
+    int flg;
     while (run) {
         switch (fsm->getState()) {
             case STATE_INIT:
@@ -54,8 +55,27 @@ int main(int argc, char** argv) {
                     fsm->setState(STATE_ERR);
                 break;
             case STATE_REQUEST:
-                dhcp_client->DHCP_Request();
-                fsm->setState(STATE_ERR);
+                if (dhcp_client->DHCP_Request() == EXIT_SUCCESS)
+                    fsm->setState(STATE_TEST_ARP);
+                else
+                    fsm->setState(STATE_ERR);
+                break;
+            case STATE_TEST_ARP:
+                flg = dhcp_client->DHCP_Test_ARP();
+                if (flg == EXIT_SUCCESS) {
+                    /// goto next state
+                } else if (flg == ARP_FAIL) {
+                    fsm->setState(STATE_SEND_DECLINE);
+                } else {
+                    fsm->setState(STATE_ERR);
+                }
+                break;
+            case STATE_SEND_DECLINE:
+                if (dhcp_client->DHCP_Send_Decline() == EXIT_SUCCESS)
+                    fsm->setState(STATE_INIT);
+                else
+                    fsm->setState(STATE_ERR);
+                break;
             case STATE_ERR:
                 dhcp_client->DHCP_Error_Hadler();
                 run = false;

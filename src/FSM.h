@@ -10,6 +10,8 @@ enum states {
     STATE_SELECT,
     STATE_ERR,
     STATE_REQUEST,
+    STATE_TEST_ARP,
+    STATE_SEND_DECLINE,
 };
 
 class FSM {
