@@ -12,6 +12,9 @@ enum states {
     STATE_REQUEST,
     STATE_TEST_ARP,
     STATE_SEND_DECLINE,
+    STATE_BINDING,
+    STATE_RENEWAL,
+    STATE_REASSOCIATION,
 };
 
 class FSM {

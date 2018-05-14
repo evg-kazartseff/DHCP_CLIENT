@@ -63,7 +63,7 @@ int main(int argc, char** argv) {
             case STATE_TEST_ARP:
                 flg = dhcp_client->DHCP_Test_ARP();
                 if (flg == EXIT_SUCCESS) {
-                    /// goto next state
+                    fsm->setState(STATE_BINDING);
                 } else if (flg == ARP_FAIL) {
                     fsm->setState(STATE_SEND_DECLINE);
                 } else {
@@ -72,6 +72,34 @@ int main(int argc, char** argv) {
                 break;
             case STATE_SEND_DECLINE:
                 if (dhcp_client->DHCP_Send_Decline() == EXIT_SUCCESS)
+                    fsm->setState(STATE_INIT);
+                else
+                    fsm->setState(STATE_ERR);
+                break;
+            case STATE_BINDING:
+                if (dhcp_client->DHCP_Binding() == EXIT_SUCCESS) {
+                    fsm->setState(STATE_RENEWAL);
+                }
+                else
+                    fsm->setState(STATE_ERR);
+                break;
+            case STATE_RENEWAL:
+                flg = dhcp_client->DHCP_Renewal();
+                if (flg == EXIT_SUCCESS) {
+                    fsm->setState(STATE_BINDING);
+                }
+                else if (flg == GOTO_INIT_STATE)
+                    fsm->setState(STATE_INIT);
+                else if (flg == GOTO_REASSOCIATION_STATE)
+                    fsm->setState(STATE_REASSOCIATION);
+                else
+                    fsm->setState(STATE_ERR);
+                break;
+            case STATE_REASSOCIATION:
+                flg = dhcp_client->DHCP_Reassociation();
+                if (flg == EXIT_SUCCESS)
+                    fsm->setState(STATE_BINDING);
+                else if (flg == GOTO_INIT_STATE)
                     fsm->setState(STATE_INIT);
                 else
                     fsm->setState(STATE_ERR);

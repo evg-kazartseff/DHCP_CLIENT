@@ -62,6 +62,9 @@
 #define RECV_TIMEOUT_USEC            10
 #define ARP_FAIL                    100
 
+#define GOTO_INIT_STATE             2
+#define GOTO_REASSOCIATION_STATE    3
+
 typedef struct dhcp_packet_struct {
     u_int8_t  op;                   /* packet type */
     u_int8_t  htype;                /* type of hardware address for this machine (Ethernet, etc) */
@@ -93,7 +96,11 @@ struct sockaddr_ll;
 typedef enum {
     NO_ERROR,
     DHCP_SERVERS_NOT_RESPOND,
-    SEND_ERROR
+    SEND_ERROR,
+    DHCPACK_BUFF_IS_EMPTY,
+    DHCP_SERVER_NO_SEND_LEASE_TIME,
+    DHCP_SERVER_NO_SEND_ACK_PACK,
+    DHCP_SERVER_NO_SEND_OFFER_PACK,
 } Errors_enum;
 
 class DHCP_CLIENT {
@@ -139,11 +146,26 @@ private:
     std::queue<char*> DHCPOFFER_queue;
     std::queue<char*> DHCPPACK_buff;
 
+    struct Timing {
+        double time_ACK;
+        double lease_time;
+        double renewal_time;
+        double rebinding_time;
+    };
+    struct Timing timing;
+    struct TimeOut {
+        double lease_timeout;
+        double renewal_timeout;
+        double rebinding_timeout;
+    };
+    struct TimeOut timeout;
+
     char* get_DHCPDISCOVER_packet();
     int Get_DHCPOFFER_packets();
     char* get_DHCPREQUEST_packet(in_addr offer_ip);
     char* get_DHCPACK_packet();
     char* get_DHCPDECLINE_packet(in_addr_t ip);
+    char* get_DHCP_packet();
     int Fill_eth_hdr(Ethhdr* ethhdr);
     int Fill_ip_hdr(Iphdr* iphdr);
     int Fill_udp_hdr(Udphdr* udphdr);
@@ -155,6 +177,8 @@ private:
     char* get_ARPREQUEST(char* target_ip);
     bool get_ARPREPLY(char* ip_from);
     int32_t Find_DHCP_option(Dhcp_packet* DHCP_pack, char option);
+    double get_time();
+    char* get_Renewal_DHCPREQUEST_packet(in_addr_t server_ip, in_addr_t my_ip);
 public:
     explicit DHCP_CLIENT(char* ifname);
     int DHCP_Init();
@@ -163,6 +187,10 @@ public:
     int DHCP_Test_ARP();
     int DHCP_Send_Decline();
     int DHCP_Error_Hadler();
+    int DHCP_Binding();
+    int DHCP_Renewal();
+    int DHCP_Reassociation();
+    void DHCP_Show_Settings();
 };
 
 #endif //DHCP_CLIENT_DHCP_CLIENT_H

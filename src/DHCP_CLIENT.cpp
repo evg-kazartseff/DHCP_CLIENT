@@ -1,6 +1,7 @@
 //
 // Created by evgenii on 21.03.18.
 //
+#include <sys/time.h>
 #include "DHCP_CLIENT.h"
 
 DHCP_CLIENT::DHCP_CLIENT(char* ifname) {
@@ -132,7 +133,7 @@ int DHCP_CLIENT::Fill_base_dhcp_pac(Dhcp_packet* dhcp) {
     dhcp->hops = 0;
     this->packet_xid = static_cast<uint32_t>(random());
     dhcp->xid = htonl(this->packet_xid);
-    dhcp->secs = 0x01;
+    dhcp->secs = 0x00;
     dhcp->flags = 0x00;
     /* our hardware address */
     memcpy(dhcp->chaddr, this->client.mac, ETH_ALEN);
@@ -236,8 +237,13 @@ int DHCP_CLIENT::Get_DHCPOFFER_packets() {
         if (ntohs(udp_hdr->dest) == this->client.port)
             if (memcmp(eth_hdr->ether_dhost, this->client.mac, ETH_ALEN) == 0 || memcmp(eth_hdr->ether_dhost, this->servers.mac, ETH_ALEN) == 0)
                 if (ntohl(dhcp_pack->xid) == this->packet_xid) {
-                    this->DHCPOFFER_queue.push(pac);
-                    pac = nullptr;
+                    int cur = Find_DHCP_option(dhcp_pack, DHCP_OPTION_MESSAGE_TYPE);
+                    if (cur != -1) {
+                        if (dhcp_pack->options[cur + 2] == DHCPOFFER) {
+                            this->DHCPOFFER_queue.push(pac);
+                            pac = nullptr;
+                        }
+                    }
                 }
     }
     if (this->DHCPOFFER_queue.empty())
@@ -274,6 +280,7 @@ int DHCP_CLIENT::DHCP_Request() {
     delete REQUEST;
 
     char* ACK = this->get_DHCPACK_packet();
+    this->timing.time_ACK = this->get_time();
     this->DHCPPACK_buff.push(ACK);
     return EXIT_SUCCESS;
 }
@@ -335,6 +342,9 @@ int DHCP_CLIENT::DHCP_Error_Hadler() {
         case SEND_ERROR:
             std::cerr << "Error send" << std::endl;
             break;
+        case DHCPACK_BUFF_IS_EMPTY:
+            std::cerr << "Serer didn't send DHCPACK packet" << std::endl;
+            break;
         default:
             break;
     }
@@ -378,8 +388,10 @@ char* DHCP_CLIENT::get_DHCPACK_packet() {
 }
 
 int DHCP_CLIENT::DHCP_Test_ARP() {
-    if (this->DHCPPACK_buff.empty())
+    if (this->DHCPPACK_buff.empty()) {
+        this->Error = DHCPACK_BUFF_IS_EMPTY;
         return EXIT_FAILURE;
+    }
     char* DHCPACK_packet = this->DHCPPACK_buff.front();
     auto* dhcppack = (Dhcp_packet *) (DHCPACK_packet + this->offset.goto_dhcppac);
     char ip[4];
@@ -449,6 +461,11 @@ bool DHCP_CLIENT::get_ARPREPLY(char* ip_from) {
 }
 
 int DHCP_CLIENT::DHCP_Send_Decline() {
+    if (this->DHCPPACK_buff.empty()) {
+        this->Error = DHCPACK_BUFF_IS_EMPTY;
+        return EXIT_FAILURE;
+    }
+
     char* DHCPACK_packet = this->DHCPPACK_buff.front();
     auto* dhcppack = (Dhcp_packet *) (DHCPACK_packet + this->offset.goto_dhcppac);
     char* packet = this->get_DHCPDECLINE_packet(dhcppack->yiaddr.s_addr);
@@ -485,4 +502,207 @@ char* DHCP_CLIENT::get_DHCPDECLINE_packet(in_addr_t ip) {
     Udp_csum(ip_hdr, udp_hdr);
 
     return packet;
+}
+
+int DHCP_CLIENT::DHCP_Binding() {
+    if (this->DHCPPACK_buff.empty()) {
+        this->Error = DHCPACK_BUFF_IS_EMPTY;
+        return EXIT_FAILURE;
+    }
+
+    char* DHCPACK_packet = this->DHCPPACK_buff.front();
+    auto* dhcppack = (Dhcp_packet *) (DHCPACK_packet + this->offset.goto_dhcppac);
+    int32_t cur = Find_DHCP_option(dhcppack, DHCP_OPTION_LEASE_TIME);
+    if (cur == -1) {
+        this->Error = DHCP_SERVER_NO_SEND_LEASE_TIME;
+        return EXIT_FAILURE;
+    }
+    uint32_t local_lease_time;
+    memcpy(&local_lease_time, &dhcppack->options[cur + 2], 4);
+    local_lease_time = htonl(local_lease_time);
+    this->timing.lease_time = 30; //local_lease_time;
+    this->timing.renewal_time = this->timing.lease_time / 2;
+    this->timing.rebinding_time = this->timing.lease_time * 0.875;
+
+    double time_now = this->get_time();
+
+    this->timeout.renewal_timeout = this->timing.renewal_time - (time_now - this->timing.time_ACK) + (random() % 10 + 1);
+    this->timeout.rebinding_timeout = this->timing.rebinding_time + (random() % 10 + 1);
+    this->timeout.lease_timeout = this->timing.lease_time + 20;
+    this->DHCP_Show_Settings();
+    sleep(static_cast<unsigned int>(this->timeout.renewal_timeout));
+    return EXIT_SUCCESS;
+}
+
+double DHCP_CLIENT::get_time() {
+    struct timeval t;
+    gettimeofday(&t, NULL);
+    return (double) t.tv_sec + (double) t.tv_usec * 1E-6;
+}
+
+int DHCP_CLIENT::DHCP_Renewal() {
+    if(this->DHCPPACK_buff.empty()) {
+        this->Error = DHCPACK_BUFF_IS_EMPTY;
+        return EXIT_FAILURE;
+    }
+    char* DHCPACK_packet = this->DHCPPACK_buff.front();
+    Dhcp_packet* dhcpack = (Dhcp_packet*) (DHCPACK_packet + this->offset.goto_dhcppac);
+
+    while ((this->get_time() - this->timing.time_ACK) < this->timeout.rebinding_timeout) {
+        char* REQUEST = this->get_Renewal_DHCPREQUEST_packet(dhcpack->siaddr.s_addr, dhcpack->yiaddr.s_addr);
+        if (sendto(this->sock, REQUEST, MAX_SIZE_PACKET, 0, (struct sockaddr*) &this->addr_ll, sizeof(struct sockaddr_ll)) < 0) {
+            this->Error = SEND_ERROR;
+            delete REQUEST;
+            return EXIT_FAILURE;
+        }
+        delete REQUEST;
+
+        char* ACK = this->get_DHCP_packet();
+        if (!ACK) {
+            continue;
+        }
+        Dhcp_packet* dhcp_pack = (Dhcp_packet*) (ACK + this->offset.goto_dhcppac);
+        int cur = Find_DHCP_option(dhcp_pack, DHCP_OPTION_MESSAGE_TYPE);
+        if (cur != -1) {
+            if (dhcp_pack->options[cur + 2] == DHCPACK) {
+                this->timing.time_ACK = this->get_time();
+                this->DHCPPACK_buff.pop();
+                this->DHCPPACK_buff.push(ACK);
+                return EXIT_SUCCESS;
+            } else if (dhcp_pack->options[cur + 2] == DHCPNACK) {
+                delete ACK;
+                return GOTO_INIT_STATE;
+            } else {
+                delete ACK;
+                continue;
+            }
+        }
+    }
+    return GOTO_REASSOCIATION_STATE;
+}
+
+char* DHCP_CLIENT::get_DHCP_packet() {
+    uint32_t socklen;
+    struct sockaddr_in recv_addrin {};
+    memset(&recv_addrin, 0, sizeof(struct sockaddr_in));
+    ssize_t bytes_read;
+    size_t wait = this->select_timeout;
+    auto* pack = new char[MAX_SIZE_PACKET];
+    while (wait--) {
+        bytes_read = recvfrom(this->sock, pack, MAX_SIZE_PACKET, 0, (struct sockaddr*) &recv_addrin, &socklen);
+        if (bytes_read == EAGAIN || bytes_read <= 0) {
+            continue;
+        }
+        auto* eth_hdr = (Ethhdr*) pack;
+        auto* udp_hdr = (Udphdr*) (pack + this->offset.goto_udphdr);
+        auto* dhcp_pack = (Dhcp_packet*) (pack + this->offset.goto_dhcppac);
+        if (ntohs(udp_hdr->dest) == this->client.port) {
+            if (memcmp(eth_hdr->ether_dhost, this->client.mac, ETH_ALEN) == 0 || memcmp(eth_hdr->ether_dhost, this->servers.mac, ETH_ALEN) == 0) {
+                if (ntohl(dhcp_pack->xid) == this->packet_xid) {
+                    return pack;
+                }
+            }
+        }
+    }
+    return nullptr;
+}
+
+char* DHCP_CLIENT::get_Renewal_DHCPREQUEST_packet(in_addr_t server_ip, in_addr_t my_ip) {
+    char* packet = new char[MAX_SIZE_PACKET];
+    memset(packet, 0, MAX_SIZE_PACKET);
+    auto* eth_hdr = (Ethhdr*) packet;
+    auto* ip_hdr = (Iphdr*) (packet + this->offset.goto_iphdr);
+    auto* udp_hdr = (Udphdr*) (packet + this->offset.goto_udphdr);
+    auto* Dhcp_pack = (Dhcp_packet*) (packet + this->offset.goto_dhcppac);
+
+
+    Fill_eth_hdr(eth_hdr);
+    Fill_ip_hdr(ip_hdr);
+    memcpy(&ip_hdr->daddr, &server_ip, IP_ALEN);
+    memcpy(&ip_hdr->saddr, &my_ip, IP_ALEN);
+    Fill_udp_hdr(udp_hdr);
+    Fill_base_dhcp_pac(Dhcp_pack);
+    Dhcp_pack->ciaddr.s_addr = my_ip;
+
+    uint32_t cur = 0;
+    char option = DHCPREQUEST;
+    cur = Fill_dhcp_options(Dhcp_pack, cur, DHCP_OPTION_MESSAGE_TYPE, 1, &option);
+    cur = Fill_dhcp_options(Dhcp_pack, cur, DHCP_OPTION_HOST_NAME, static_cast<uint8_t>(strlen(this->hostname)), this->hostname);
+
+    unsigned char parameter_request_list[16];
+    parameter_request_list[0] = 1;      // Subnet Mask
+    parameter_request_list[1] = DHCP_OPTION_BROADCAST_ADDRESS;     // Broadcast Address
+    parameter_request_list[2] = 2;      // Time Offset
+    parameter_request_list[3] = 3;      // Router
+    parameter_request_list[4] = 15;     // Domain Name
+    parameter_request_list[5] = 6;      // Domain Name Server
+    parameter_request_list[6] = 119;    // Domain Search
+    parameter_request_list[7] = DHCP_OPTION_HOST_NAME;     // Host Name
+    parameter_request_list[8] = 44;     // NetBIOS over TCP/IP Name Server
+    parameter_request_list[9] = 47;     // NetBIOS over TCP/IP Scope
+    parameter_request_list[10] = 26;    // Interface MTU
+    parameter_request_list[11] = 121;   // Classless Static Route
+    parameter_request_list[12] = 42;    // Network Time Protocol Servers
+    parameter_request_list[13] = 249;   // Private/Classless Static Route (Microsoft)
+    parameter_request_list[14] = 33;    // Static Route
+    parameter_request_list[15] = 252;   // Private/Proxy autodiscovery
+
+    cur = Fill_dhcp_options(Dhcp_pack, cur, DHCP_OPTION_REQUEST_LIST, 16, reinterpret_cast<char*>(parameter_request_list));
+    Dhcp_pack->options[cur] = static_cast<char>(DHCP_OPTION_END);
+
+    Ip_csum(ip_hdr);
+    Udp_csum(ip_hdr, udp_hdr);
+    return packet;
+}
+
+int DHCP_CLIENT::DHCP_Reassociation() {
+    if(this->DHCPPACK_buff.empty()) {
+        this->Error = DHCPACK_BUFF_IS_EMPTY;
+        return EXIT_FAILURE;
+    }
+    char* DHCPACK_packet = this->DHCPPACK_buff.front();
+    Dhcp_packet* dhcpack = (Dhcp_packet*) (DHCPACK_packet + this->offset.goto_dhcppac);
+    while ((this->get_time() - this->timing.time_ACK) < this->timeout.lease_timeout) {
+        char* REQUEST = this->get_DHCPREQUEST_packet(dhcpack->yiaddr);
+        if (sendto(this->sock, REQUEST, MAX_SIZE_PACKET, 0, (struct sockaddr*) &this->addr_ll, sizeof(struct sockaddr_ll)) < 0) {
+            this->Error = SEND_ERROR;
+            delete REQUEST;
+            return EXIT_FAILURE;
+        }
+        delete REQUEST;
+
+        char* ACK = this->get_DHCP_packet();
+        if (!ACK) {
+            continue;
+        }
+        Dhcp_packet* dhcp_pack = (Dhcp_packet*) (ACK + this->offset.goto_dhcppac);
+        int cur = Find_DHCP_option(dhcp_pack, DHCP_OPTION_MESSAGE_TYPE);
+        if (cur != -1) {
+            if (dhcp_pack->options[cur + 2] == DHCPACK) {
+                this->timing.time_ACK = this->get_time();
+                this->DHCPPACK_buff.pop();
+                this->DHCPPACK_buff.push(ACK);
+                return EXIT_SUCCESS;
+            } else if (dhcp_pack->options[cur + 2] == DHCPNACK) {
+                delete ACK;
+                return GOTO_INIT_STATE;
+            } else {
+                delete ACK;
+                continue;
+            }
+        }
+    }
+    return GOTO_INIT_STATE;
+}
+
+void DHCP_CLIENT::DHCP_Show_Settings() {
+    if(this->DHCPPACK_buff.empty()) {
+        this->Error = DHCPACK_BUFF_IS_EMPTY;
+        return;
+    }
+    char* DHCPACK_packet = this->DHCPPACK_buff.front();
+    Dhcp_packet* dhcpack = (Dhcp_packet*) (DHCPACK_packet + this->offset.goto_dhcppac);
+    char str[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &(dhcpack->yiaddr), str, INET_ADDRSTRLEN);
+    std::cout << "You IP Address: " << str << std::endl;
 }
